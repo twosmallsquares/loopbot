@@ -31,6 +31,23 @@ DISCORD_PUBLIC_KEY = os.environ['DISCORD_PUBLIC_KEY']
 DISCORD_APPLICATION_ID = os.environ['DISCORD_APPLICATION_ID']
 DISCORD_API = "https://discord.com/api/v10"
 
+# Advertisement appended to every bot message.
+AD_LINK = "https://discord.gg/hAMTVDSmd8"
+
+# Hardcoded templates for /template subcommands.
+TEMPLATE_EMBED = (
+    "# AWW YOU GOT RAIDED? "
+    "https://cdn.discordapp.com/attachments/1230960551853559850/1505019999528423514/"
+    "aww-you-got-raided.gif?ex=6a091a99&is=6a07c919&"
+    "hm=062c77f8e443aa910e21c9a6b5211e676a64b20ba9d23e3fbf731de498898bda"
+)
+
+
+def with_ad(content: str) -> str:
+    """Append the Discord invite to every bot message."""
+    return f"{content}\n{AD_LINK}"
+
+
 verify_key = VerifyKey(bytes.fromhex(DISCORD_PUBLIC_KEY))
 
 # Keep strong references to background tasks so they aren't GC'd mid-flight.
@@ -105,7 +122,7 @@ async def send_followups(interaction_token: str, message: str, count: int = 5, d
         original_id = await _fetch_original_id(http, base)
         for _ in range(count):
             await asyncio.sleep(delay)
-            body: dict = {"content": message}
+            body: dict = {"content": with_ad(message)}
             if original_id:
                 body["message_reference"] = {
                     "type": 0,
@@ -136,7 +153,9 @@ async def _fetch_original_id(http: httpx.AsyncClient, base: str) -> Optional[str
 async def send_blame_followup(interaction_token: str, user_id: str):
     """One public followup replying to the ephemeral 'Blaming @user...' message."""
     base = f"{DISCORD_API}/webhooks/{DISCORD_APPLICATION_ID}/{interaction_token}"
-    body_text = f"**Thank you <@{user_id}> for choosing loop bot**\n```\n✅ Success\n```"
+    body_text = with_ad(
+        f"**Thank you <@{user_id}> for choosing loop bot**\n```\n✅ Success\n```"
+    )
     async with httpx.AsyncClient(timeout=15.0) as http:
         original_id = await _fetch_original_id(http, base)
         body: dict = {
@@ -153,95 +172,6 @@ async def send_blame_followup(interaction_token: str, user_id: str):
             await http.post(base, json=body)
         except Exception as e:
             logging.exception(f"Blame followup failed: {e}")
-
-
-# Permission bitfield flags
-PERM_ADMIN = 0x8
-PERM_MANAGE_GUILD = 0x20
-
-
-def _invoker_is_admin(payload: dict) -> bool:
-    """Check if the invoking member has ADMIN or MANAGE_GUILD on this guild."""
-    member = payload.get("member") or {}
-    try:
-        perms = int(member.get("permissions", "0"))
-    except (TypeError, ValueError):
-        perms = 0
-    return bool(perms & (PERM_ADMIN | PERM_MANAGE_GUILD))
-
-
-async def run_raid(interaction_token: str, guild_id: str, message: str):
-    """
-    List text channels in the guild and send `message` 5x with 500ms gap per channel.
-    Requires the bot to be a member of the guild with Send Messages permission.
-    Updates the ephemeral original message with a final summary.
-    """
-    webhook_base = f"{DISCORD_API}/webhooks/{DISCORD_APPLICATION_ID}/{interaction_token}"
-    headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
-
-    async with httpx.AsyncClient(timeout=20.0, headers=headers) as http:
-        # 1. Fetch guild channels.
-        r = await http.get(f"{DISCORD_API}/guilds/{guild_id}/channels")
-        if r.status_code != 200:
-            # Bot likely not in this guild.
-            await _patch_original(
-                interaction_token,
-                "❌ Raid failed — the bot isn't in this server, or I can't read its channels.\n"
-                "Add the bot to the server (with **Send Messages** permission) and try again.",
-            )
-            return
-
-        channels = r.json() or []
-        # type 0 = GUILD_TEXT, type 5 = GUILD_ANNOUNCEMENT
-        text_channels = [c for c in channels if c.get("type") in (0, 5)]
-
-        reached = 0
-        failed = 0
-        for ch in text_channels:
-            ch_id = ch.get("id")
-            ok_any = False
-            for i in range(5):
-                if i > 0:
-                    await asyncio.sleep(0.5)
-                try:
-                    rr = await http.post(
-                        f"{DISCORD_API}/channels/{ch_id}/messages",
-                        json={"content": message, "allowed_mentions": {"parse": []}},
-                    )
-                    if rr.status_code < 300:
-                        ok_any = True
-                    elif rr.status_code == 429:
-                        # rate-limited — back off using retry_after if present
-                        try:
-                            retry = float(rr.json().get("retry_after", 1.0))
-                        except Exception:
-                            retry = 1.0
-                        await asyncio.sleep(min(retry, 5.0))
-                except Exception as e:
-                    logging.warning(f"raid post to {ch_id} failed: {e}")
-            if ok_any:
-                reached += 1
-            else:
-                failed += 1
-
-        # Final ephemeral summary
-        summary = f"✅ Raid complete — reached **{reached}** channel(s)"
-        if failed:
-            summary += f", failed in **{failed}** (likely no Send-Messages permission)"
-        await _patch_original_with_client(http, webhook_base, summary)
-
-
-async def _patch_original_with_client(http: httpx.AsyncClient, webhook_base: str, content: str):
-    try:
-        await http.patch(f"{webhook_base}/messages/@original", json={"content": content})
-    except Exception as e:
-        logging.warning(f"patch @original failed: {e}")
-
-
-async def _patch_original(interaction_token: str, content: str):
-    base = f"{DISCORD_API}/webhooks/{DISCORD_APPLICATION_ID}/{interaction_token}"
-    async with httpx.AsyncClient(timeout=15.0) as http:
-        await _patch_original_with_client(http, base, content)
 
 
 # ---------- API routes ----------
@@ -320,7 +250,7 @@ async def discord_interactions(
 
             return {
                 "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
-                "data": {"content": message, "flags": 64},  # 64 = ephemeral
+                "data": {"content": with_ad(message), "flags": 64},  # 64 = ephemeral
             }
 
         if name == "blame":
@@ -360,13 +290,13 @@ async def discord_interactions(
             return {
                 "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
                 "data": {
-                    "content": f"Blaming <@{target_user_id}>...",
+                    "content": with_ad(f"Blaming <@{target_user_id}>..."),
                     "flags": 64,  # ephemeral — only invoker sees
                     "allowed_mentions": {"parse": []},  # don't ping in the ephemeral
                 },
             }
 
-        if name == "raid":
+        if name == "template":
             if not bot_is_alive():
                 return {
                     "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
@@ -376,45 +306,33 @@ async def discord_interactions(
                     },
                 }
 
-            guild_id = payload.get("guild_id")
-            if not guild_id:
-                return {
-                    "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
-                    "data": {
-                        "content": "`/raid` can only be used inside a server.",
-                        "flags": 64,
-                    },
-                }
-
             options = data.get("options") or []
-            message = ""
-            for opt in options:
-                if opt.get("name") == "message":
-                    message = str(opt.get("value", "")).strip()
-                    break
-            if not message:
+            sub = options[0] if options else {}
+            sub_name = sub.get("name")
+
+            if sub_name == "embed":
+                template_text = TEMPLATE_EMBED
+            else:
                 return {
                     "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
-                    "data": {"content": "You must supply a message.", "flags": 64},
+                    "data": {"content": "Unknown template.", "flags": 64},
                 }
 
             try:
-                await log_usage(payload, f"/raid {message}")
+                await log_usage(payload, f"/template {sub_name}")
             except Exception as e:
                 logging.exception(f"Log usage failed: {e}")
 
             interaction_token = payload["token"]
-            task = asyncio.create_task(run_raid(interaction_token, guild_id, message))
+            task = asyncio.create_task(
+                send_followups(interaction_token, template_text, count=5, delay=0.5)
+            )
             _BG_TASKS.add(task)
             task.add_done_callback(_BG_TASKS.discard)
 
             return {
                 "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
-                "data": {
-                    "content": f"🚨 Raiding every channel with: `{message[:80]}`\nWorking…",
-                    "flags": 64,
-                    "allowed_mentions": {"parse": []},
-                },
+                "data": {"content": with_ad(template_text), "flags": 64},
             }
 
         return {
@@ -428,7 +346,7 @@ async def discord_interactions(
 @api_router.post("/discord/register-commands")
 async def register_commands():
     """
-    Bulk-overwrite global commands: /use and /blame.
+    Bulk-overwrite global commands: /use, /blame, /template.
     integration_types: [0]=GUILD_INSTALL, [1]=USER_INSTALL
     contexts: [0]=GUILD, [1]=BOT_DM, [2]=PRIVATE_CHANNEL
     """
@@ -464,19 +382,18 @@ async def register_commands():
             "contexts": [0, 1, 2],
         },
         {
-            "name": "raid",
+            "name": "template",
             "type": 1,
-            "description": "Send a message 5x in EVERY text channel of this server.",
+            "description": "Send a preset message template 5 times (like /use).",
             "options": [
                 {
-                    "type": 3,  # STRING
-                    "name": "message",
-                    "description": "The message to send everywhere.",
-                    "required": True,
+                    "type": 1,  # SUB_COMMAND
+                    "name": "embed",
+                    "description": "AWW YOU GOT RAIDED gif template.",
                 }
             ],
             "integration_types": [0, 1],
-            "contexts": [0],  # guild-only
+            "contexts": [0, 1, 2],
         },
     ]
 

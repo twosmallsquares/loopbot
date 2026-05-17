@@ -17,11 +17,13 @@ import {
   Power,
   PowerOff,
   AlertTriangle,
+  Megaphone,
 } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
 const INTERACTIONS_URL = `${BACKEND_URL}/api/discord/interactions`;
+const AD_LINK = "https://discord.gg/hAMTVDSmd8";
 
 const CopyField = ({ label, value, testId }) => {
   const [copied, setCopied] = useState(false);
@@ -72,7 +74,7 @@ const Step = ({ n, title, children }) => (
 );
 
 const Cmd = ({ name, desc }) => (
-  <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-3" data-testid={`cmd-${name}`}>
+  <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-3" data-testid={`cmd-${name.split(" ")[0]}`}>
     <code className="font-mono text-sm text-emerald-300">/{name}</code>
     <p className="mt-1 text-xs text-zinc-400">{desc}</p>
   </div>
@@ -83,24 +85,21 @@ const Home = () => {
   const [recent, setRecent] = useState([]);
   const [registering, setRegistering] = useState(false);
   const [installUrl, setInstallUrl] = useState("");
-  const [botInstallUrl, setBotInstallUrl] = useState("");
   const [botStatus, setBotStatus] = useState({ is_running: false, alive: false });
   const [toggling, setToggling] = useState(false);
 
   const loadAll = async () => {
     try {
-      const [s, r, i, b, bi] = await Promise.all([
+      const [s, r, i, b] = await Promise.all([
         axios.get(`${API}/usage/stats`),
         axios.get(`${API}/usage/recent?limit=10`),
         axios.get(`${API}/discord/install-link`),
         axios.get(`${API}/bot/status`),
-        axios.get(`${API}/discord/bot-install-link`),
       ]);
       setStats(s.data);
       setRecent(r.data);
       setInstallUrl(i.data.url);
       setBotStatus(b.data);
-      setBotInstallUrl(bi.data.url);
     } catch (e) {
       console.error(e);
     }
@@ -142,7 +141,7 @@ const Home = () => {
     setRegistering(true);
     try {
       await axios.post(`${API}/discord/register-commands`);
-      toast.success("Commands registered: /use, /blame, /raid");
+      toast.success("Commands registered: /use, /blame, /template");
     } catch (e) {
       toast.error("Registration failed: " + (e.response?.data?.detail || e.message));
     } finally {
@@ -185,7 +184,7 @@ const Home = () => {
           </Badge>
         </header>
 
-        {/* Power control */}
+        {/* Power */}
         <section className="mt-10" data-testid="power-card">
           <Card
             className={
@@ -240,13 +239,25 @@ const Home = () => {
               )}
             </CardContent>
           </Card>
+        </section>
 
-          <p className="mt-3 flex items-start gap-2 text-xs text-zinc-500">
-            <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-400/80" />
-            <span>
-              Bot is online 24/7 by default. <b>Stop</b> is a manual kill switch.
-            </span>
-          </p>
+        {/* Ad banner */}
+        <section className="mt-6">
+          <div className="flex items-start gap-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-4" data-testid="ad-banner">
+            <Megaphone className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
+            <div className="text-sm text-zinc-300">
+              Every bot message auto-appends your Discord invite:{" "}
+              <a
+                href={AD_LINK}
+                target="_blank"
+                rel="noreferrer"
+                className="font-mono text-emerald-300 hover:underline"
+                data-testid="ad-link"
+              >
+                {AD_LINK}
+              </a>
+            </div>
+          </div>
         </section>
 
         {/* Hero */}
@@ -284,16 +295,6 @@ const Home = () => {
                 </Button>
               </a>
             )}
-            {botInstallUrl && (
-              <a href={botInstallUrl} target="_blank" rel="noreferrer" data-testid="bot-install-link">
-                <Button
-                  variant="outline"
-                  className="border-amber-500/30 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20"
-                >
-                  <Link2 className="mr-2 h-4 w-4" /> Add bot to a server (for /raid)
-                </Button>
-              </a>
-            )}
           </div>
         </section>
 
@@ -301,15 +302,15 @@ const Home = () => {
         <section className="mt-14 grid grid-cols-1 gap-3 sm:grid-cols-3" data-testid="commands-section">
           <Cmd
             name="use message:hi"
-            desc="Sends `hi` 5 times, 500ms apart. Replies look like 'Original deleted'."
+            desc="Sends `hi` 5 times, 500ms apart. Replies show 'Original deleted' to others."
           />
           <Cmd
             name="blame user:@x"
-            desc="Ephemeral 'Blaming…' then a public 'Thank you @x for choosing loop bot ✅'."
+            desc="Ephemeral 'Blaming…' then public 'Thank you @x for choosing loop bot ✅'."
           />
           <Cmd
-            name="raid message:hi"
-            desc="Sends 5x in every text channel the bot can access. Bot must be in the server."
+            name="template embed"
+            desc="'AWW YOU GOT RAIDED?' gif template, same 5x loop trick."
           />
         </section>
 
@@ -341,7 +342,7 @@ const Home = () => {
                   Discord Developer Portal
                 </a>{" "}
                 → your app → <b>General Information</b>, paste this URL into{" "}
-                <b>Interactions Endpoint URL</b> and save:
+                <b>Interactions Endpoint URL</b>:
                 <div className="mt-3">
                   <CopyField label="endpoint" value={INTERACTIONS_URL} testId="endpoint" />
                 </div>
@@ -350,12 +351,11 @@ const Home = () => {
                 In <b>Installation</b> tab, enable <b>User Install</b> under Installation Contexts.
               </Step>
               <Step n="3" title="Register commands">
-                Click <b>Register all commands</b>. Registers <code>/use</code>, <code>/blame</code>,{" "}
-                <code>/raid</code>.
+                Click <b>Register all commands</b>. Registers <code>/use</code>,{" "}
+                <code>/blame</code>, <code>/template</code>.
               </Step>
-              <Step n="4" title="Add bot to a server (for /raid only)">
-                Click <b>Add bot to a server</b>. The bot needs to be a guild member with{" "}
-                <b>Send Messages</b> permission so it can post in every channel.
+              <Step n="4" title="You're done">
+                Install on your account and use the commands anywhere on Discord.
               </Step>
             </CardContent>
           </Card>
