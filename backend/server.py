@@ -102,19 +102,7 @@ async def send_followups(interaction_token: str, message: str, count: int = 5, d
     """
     base = f"{DISCORD_API}/webhooks/{DISCORD_APPLICATION_ID}/{interaction_token}"
     async with httpx.AsyncClient(timeout=15.0) as http:
-        # Get original message id (ephemeral msg the user just sent).
-        original_id: Optional[str] = None
-        for _ in range(5):  # small retry for propagation
-            try:
-                r = await http.get(f"{base}/messages/@original")
-                if r.status_code == 200:
-                    original_id = r.json().get("id")
-                    if original_id:
-                        break
-            except Exception as e:
-                logging.warning(f"fetch @original failed: {e}")
-            await asyncio.sleep(0.15)
-
+        original_id = await _fetch_original_id(http, base)
         for _ in range(count):
             await asyncio.sleep(delay)
             body: dict = {"content": message}
@@ -128,6 +116,43 @@ async def send_followups(interaction_token: str, message: str, count: int = 5, d
                 await http.post(base, json=body)
             except Exception as e:
                 logging.exception(f"Followup send failed: {e}")
+
+
+async def _fetch_original_id(http: httpx.AsyncClient, base: str) -> Optional[str]:
+    """Get the ID of the interaction's original (ephemeral) response, with small retry."""
+    for _ in range(5):
+        try:
+            r = await http.get(f"{base}/messages/@original")
+            if r.status_code == 200:
+                oid = r.json().get("id")
+                if oid:
+                    return oid
+        except Exception as e:
+            logging.warning(f"fetch @original failed: {e}")
+        await asyncio.sleep(0.15)
+    return None
+
+
+async def send_blame_followup(interaction_token: str, user_id: str):
+    """One public followup replying to the ephemeral 'Blaming @user...' message."""
+    base = f"{DISCORD_API}/webhooks/{DISCORD_APPLICATION_ID}/{interaction_token}"
+    body_text = f"**Thank you <@{user_id}> for choosing loop bot**\n```\n✅ Success\n```"
+    async with httpx.AsyncClient(timeout=15.0) as http:
+        original_id = await _fetch_original_id(http, base)
+        body: dict = {
+            "content": body_text,
+            "allowed_mentions": {"users": [user_id]},
+        }
+        if original_id:
+            body["message_reference"] = {
+                "type": 0,
+                "message_id": original_id,
+                "fail_if_not_exists": False,
+            }
+        try:
+            await http.post(base, json=body)
+        except Exception as e:
+            logging.exception(f"Blame followup failed: {e}")
 
 
 # ---------- API routes ----------
@@ -209,6 +234,49 @@ async def discord_interactions(
                 "data": {"content": message, "flags": 64},  # 64 = ephemeral
             }
 
+        if name == "blame":
+            if not bot_is_alive():
+                return {
+                    "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
+                    "data": {
+                        "content": "🛑 Loop bot is offline. Open the dashboard and click **Start Bot** to wake me up.",
+                        "flags": 64,
+                    },
+                }
+
+            options = data.get("options") or []
+            target_user_id: Optional[str] = None
+            for opt in options:
+                if opt.get("name") == "user" and opt.get("type") == 6:
+                    target_user_id = str(opt.get("value"))
+                    break
+
+            if not target_user_id:
+                return {
+                    "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
+                    "data": {"content": "You must pick a user to blame.", "flags": 64},
+                }
+
+            # Log usage
+            try:
+                await log_usage(payload, f"/blame <@{target_user_id}>")
+            except Exception as e:
+                logging.exception(f"Log usage failed: {e}")
+
+            interaction_token = payload["token"]
+            task = asyncio.create_task(send_blame_followup(interaction_token, target_user_id))
+            _BG_TASKS.add(task)
+            task.add_done_callback(_BG_TASKS.discard)
+
+            return {
+                "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
+                "data": {
+                    "content": f"Blaming <@{target_user_id}>...",
+                    "flags": 64,  # ephemeral — only invoker sees
+                    "allowed_mentions": {"parse": []},  # don't ping in the ephemeral
+                },
+            }
+
         return {
             "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
             "data": {"content": "Unknown command.", "flags": 64},
@@ -220,34 +288,52 @@ async def discord_interactions(
 @api_router.post("/discord/register-commands")
 async def register_commands():
     """
-    Register the /use command globally as a user-installable command.
+    Bulk-overwrite global commands: /use and /blame.
     integration_types: [0]=GUILD_INSTALL, [1]=USER_INSTALL
     contexts: [0]=GUILD, [1]=BOT_DM, [2]=PRIVATE_CHANNEL
     """
-    command = {
-        "name": "use",
-        "type": 1,  # CHAT_INPUT
-        "description": "Send a message 5 times (500ms apart).",
-        "options": [
-            {
-                "type": 3,  # STRING
-                "name": "message",
-                "description": "The message to send 5 times.",
-                "required": True,
-            }
-        ],
-        "integration_types": [0, 1],
-        "contexts": [0, 1, 2],
-    }
+    commands = [
+        {
+            "name": "use",
+            "type": 1,
+            "description": "Send a message 5 times (500ms apart).",
+            "options": [
+                {
+                    "type": 3,
+                    "name": "message",
+                    "description": "The message to send 5 times.",
+                    "required": True,
+                }
+            ],
+            "integration_types": [0, 1],
+            "contexts": [0, 1, 2],
+        },
+        {
+            "name": "blame",
+            "type": 1,
+            "description": "Blame someone — for science.",
+            "options": [
+                {
+                    "type": 6,  # USER
+                    "name": "user",
+                    "description": "The user to blame.",
+                    "required": True,
+                }
+            ],
+            "integration_types": [0, 1],
+            "contexts": [0, 1, 2],
+        },
+    ]
 
     url = f"{DISCORD_API}/applications/{DISCORD_APPLICATION_ID}/commands"
     headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
 
     async with httpx.AsyncClient(timeout=15.0) as http:
-        r = await http.post(url, headers=headers, json=command)
+        # PUT = bulk overwrite (clears any commands not in this list).
+        r = await http.put(url, headers=headers, json=commands)
         if r.status_code >= 300:
             raise HTTPException(status_code=r.status_code, detail=r.text)
-        return {"ok": True, "command": r.json()}
+        return {"ok": True, "commands": r.json()}
 
 
 @api_router.get("/discord/install-link")
