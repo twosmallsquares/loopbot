@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import "@/App.css";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import axios from "axios";
@@ -71,26 +71,36 @@ const Step = ({ n, title, children }) => (
   </div>
 );
 
+const Cmd = ({ name, desc }) => (
+  <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-3" data-testid={`cmd-${name}`}>
+    <code className="font-mono text-sm text-emerald-300">/{name}</code>
+    <p className="mt-1 text-xs text-zinc-400">{desc}</p>
+  </div>
+);
+
 const Home = () => {
   const [stats, setStats] = useState({ total_uses: 0, total_messages_sent: 0, last_used: null });
   const [recent, setRecent] = useState([]);
   const [registering, setRegistering] = useState(false);
   const [installUrl, setInstallUrl] = useState("");
+  const [botInstallUrl, setBotInstallUrl] = useState("");
   const [botStatus, setBotStatus] = useState({ is_running: false, alive: false });
   const [toggling, setToggling] = useState(false);
 
   const loadAll = async () => {
     try {
-      const [s, r, i, b] = await Promise.all([
+      const [s, r, i, b, bi] = await Promise.all([
         axios.get(`${API}/usage/stats`),
         axios.get(`${API}/usage/recent?limit=10`),
         axios.get(`${API}/discord/install-link`),
         axios.get(`${API}/bot/status`),
+        axios.get(`${API}/discord/bot-install-link`),
       ]);
       setStats(s.data);
       setRecent(r.data);
       setInstallUrl(i.data.url);
       setBotStatus(b.data);
+      setBotInstallUrl(bi.data.url);
     } catch (e) {
       console.error(e);
     }
@@ -132,7 +142,7 @@ const Home = () => {
     setRegistering(true);
     try {
       await axios.post(`${API}/discord/register-commands`);
-      toast.success("/use command registered globally");
+      toast.success("Commands registered: /use, /blame, /raid");
     } catch (e) {
       toast.error("Registration failed: " + (e.response?.data?.detail || e.message));
     } finally {
@@ -150,7 +160,6 @@ const Home = () => {
       <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_30%_-10%,rgba(16,185,129,0.12),transparent_40%),radial-gradient(circle_at_80%_110%,rgba(99,102,241,0.10),transparent_40%)]" />
 
       <div className="relative mx-auto max-w-6xl px-6 py-12 sm:py-16">
-        {/* Header */}
         <header className="flex items-center justify-between" data-testid="header">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-500/10 ring-1 ring-emerald-500/30">
@@ -158,7 +167,7 @@ const Home = () => {
             </div>
             <div>
               <p className="font-mono text-xs uppercase tracking-[0.22em] text-zinc-500">
-                discord · user-installable
+                discord · loop bot
               </p>
               <h1 className="font-mono text-xl font-semibold text-zinc-100">quintuple</h1>
             </div>
@@ -176,12 +185,11 @@ const Home = () => {
           </Badge>
         </header>
 
-        {/* Power control card */}
+        {/* Power control */}
         <section className="mt-10" data-testid="power-card">
           <Card
             className={
-              "border bg-zinc-900/40 " +
-              (alive ? "border-emerald-500/30" : "border-zinc-800")
+              "border bg-zinc-900/40 " + (alive ? "border-emerald-500/30" : "border-zinc-800")
             }
           >
             <CardContent className="flex flex-col items-start justify-between gap-6 p-6 sm:flex-row sm:items-center">
@@ -205,9 +213,7 @@ const Home = () => {
                     bot power · 24/7
                   </p>
                   <p className="mt-1 text-lg text-zinc-100" data-testid="power-status-text">
-                    {alive
-                      ? "Online — running 24/7"
-                      : "Offline — kill switch is active"}
+                    {alive ? "Online — running 24/7" : "Offline — kill switch is active"}
                   </p>
                 </div>
               </div>
@@ -238,8 +244,7 @@ const Home = () => {
           <p className="mt-3 flex items-start gap-2 text-xs text-zinc-500">
             <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-400/80" />
             <span>
-              Bot is online 24/7 by default. <b>Stop</b> is a manual kill switch — use it if you
-              want to silence the bot without changing Discord settings.
+              Bot is online 24/7 by default. <b>Stop</b> is a manual kill switch.
             </span>
           </p>
         </section>
@@ -247,14 +252,11 @@ const Home = () => {
         {/* Hero */}
         <section className="mt-14 max-w-3xl" data-testid="hero">
           <h2 className="font-mono text-4xl font-semibold leading-tight text-zinc-100 sm:text-5xl lg:text-6xl">
-            One slash. <span className="text-emerald-400">Five echoes.</span>
+            One slash. <span className="text-emerald-400">Many echoes.</span>
           </h2>
           <p className="mt-5 max-w-xl text-base text-zinc-400">
-            A user-installable Discord app. Type{" "}
-            <code className="rounded bg-zinc-900 px-2 py-0.5 font-mono text-sm text-emerald-300">
-              /use message:hi
-            </code>{" "}
-            in any channel and your message fires 5 times, 500ms apart.
+            User-installable Discord bot. Three commands, all powered by the same
+            ephemeral-reply loop trick.
           </p>
 
           <div className="mt-8 flex flex-wrap items-center gap-3">
@@ -270,7 +272,7 @@ const Home = () => {
               ) : (
                 <Send className="mr-2 h-4 w-4" />
               )}
-              Register /use globally
+              Register all commands
             </Button>
             {installUrl && (
               <a href={installUrl} target="_blank" rel="noreferrer" data-testid="install-link">
@@ -282,17 +284,43 @@ const Home = () => {
                 </Button>
               </a>
             )}
+            {botInstallUrl && (
+              <a href={botInstallUrl} target="_blank" rel="noreferrer" data-testid="bot-install-link">
+                <Button
+                  variant="outline"
+                  className="border-amber-500/30 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20"
+                >
+                  <Link2 className="mr-2 h-4 w-4" /> Add bot to a server (for /raid)
+                </Button>
+              </a>
+            )}
           </div>
         </section>
 
+        {/* Commands */}
+        <section className="mt-14 grid grid-cols-1 gap-3 sm:grid-cols-3" data-testid="commands-section">
+          <Cmd
+            name="use message:hi"
+            desc="Sends `hi` 5 times, 500ms apart. Replies look like 'Original deleted'."
+          />
+          <Cmd
+            name="blame user:@x"
+            desc="Ephemeral 'Blaming…' then a public 'Thank you @x for choosing loop bot ✅'."
+          />
+          <Cmd
+            name="raid message:hi"
+            desc="Sends 5x in every text channel the bot can access. Bot must be in the server."
+          />
+        </section>
+
         {/* Stats */}
-        <section className="mt-14 grid grid-cols-1 gap-4 sm:grid-cols-3" data-testid="stats-section">
+        <section className="mt-10 grid grid-cols-1 gap-4 sm:grid-cols-3" data-testid="stats-section">
           <Stat label="Times used" value={stats.total_uses} testId="uses" />
           <Stat label="Messages sent" value={stats.total_messages_sent} testId="messages" />
           <Stat label="Last used" value={lastUsed} testId="last-used" />
         </section>
 
-        {/* Setup */}
+        {/* Setup + recent */}
         <section className="mt-14 grid grid-cols-1 gap-6 lg:grid-cols-5">
           <Card className="border-zinc-800 bg-zinc-900/40 lg:col-span-3" data-testid="setup-card">
             <CardHeader>
@@ -317,25 +345,17 @@ const Home = () => {
                 <div className="mt-3">
                   <CopyField label="endpoint" value={INTERACTIONS_URL} testId="endpoint" />
                 </div>
-                <p className="mt-2 text-xs text-amber-300/80">
-                  If you previously pasted a different URL, replace it with this one — that's the
-                  cause of "application didn't respond".
-                </p>
               </Step>
               <Step n="2" title="Enable User Install">
-                In <b>Installation</b> tab, set <b>Install Link</b> to <i>Discord Provided</i> and
-                enable <b>User Install</b> under <b>Installation Contexts</b>.
+                In <b>Installation</b> tab, enable <b>User Install</b> under Installation Contexts.
               </Step>
-              <Step n="3" title="Register the /use command">
-                Click <b>Register /use globally</b>. (Already done once — re-run if you change the
-                command.)
+              <Step n="3" title="Register commands">
+                Click <b>Register all commands</b>. Registers <code>/use</code>, <code>/blame</code>,{" "}
+                <code>/raid</code>.
               </Step>
-              <Step n="4" title="Install + Start">
-                Use <b>Add to your account</b>, then press <b>Start Bot</b> above. Type{" "}
-                <code className="rounded bg-zinc-950 px-1.5 py-0.5 font-mono text-emerald-300">
-                  /use
-                </code>{" "}
-                anywhere in Discord.
+              <Step n="4" title="Add bot to a server (for /raid only)">
+                Click <b>Add bot to a server</b>. The bot needs to be a guild member with{" "}
+                <b>Send Messages</b> permission so it can post in every channel.
               </Step>
             </CardContent>
           </Card>
@@ -347,7 +367,7 @@ const Home = () => {
             <CardContent>
               {recent.length === 0 ? (
                 <p className="text-sm text-zinc-500" data-testid="no-activity">
-                  No usage yet. Once someone fires <code>/use</code>, it'll show up here.
+                  No usage yet.
                 </p>
               ) : (
                 <ul className="space-y-3" data-testid="recent-list">
@@ -375,43 +395,7 @@ const Home = () => {
         </section>
 
         <footer className="mt-16 border-t border-zinc-900 pt-6 text-center font-mono text-xs text-zinc-600">
-          quintuple · http interactions · stay-open-to-stay-online
-        </footer>
-      </div>
-    </div>
-  );
-};
-
-function App() {
-  return (
-    <div className="App">
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<Home />} />
-        </Routes>
-      </BrowserRouter>
-    </div>
-  );
-}
-
-export default App;
-e || "unknown"}
-                        </span>
-                        <span className="font-mono text-[10px] text-zinc-500">
-                          {new Date(r.timestamp).toLocaleTimeString()}
-                        </span>
-                      </div>
-                      <p className="mt-1 line-clamp-2 text-sm text-zinc-300">{r.message}</p>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </CardContent>
-          </Card>
-        </section>
-
-        <footer className="mt-16 border-t border-zinc-900 pt-6 text-center font-mono text-xs text-zinc-600">
-          quintuple · http interactions · stay-open-to-stay-online
+          quintuple · http interactions · 24/7
         </footer>
       </div>
     </div>

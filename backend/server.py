@@ -155,6 +155,95 @@ async def send_blame_followup(interaction_token: str, user_id: str):
             logging.exception(f"Blame followup failed: {e}")
 
 
+# Permission bitfield flags
+PERM_ADMIN = 0x8
+PERM_MANAGE_GUILD = 0x20
+
+
+def _invoker_is_admin(payload: dict) -> bool:
+    """Check if the invoking member has ADMIN or MANAGE_GUILD on this guild."""
+    member = payload.get("member") or {}
+    try:
+        perms = int(member.get("permissions", "0"))
+    except (TypeError, ValueError):
+        perms = 0
+    return bool(perms & (PERM_ADMIN | PERM_MANAGE_GUILD))
+
+
+async def run_raid(interaction_token: str, guild_id: str, message: str):
+    """
+    List text channels in the guild and send `message` 5x with 500ms gap per channel.
+    Requires the bot to be a member of the guild with Send Messages permission.
+    Updates the ephemeral original message with a final summary.
+    """
+    webhook_base = f"{DISCORD_API}/webhooks/{DISCORD_APPLICATION_ID}/{interaction_token}"
+    headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
+
+    async with httpx.AsyncClient(timeout=20.0, headers=headers) as http:
+        # 1. Fetch guild channels.
+        r = await http.get(f"{DISCORD_API}/guilds/{guild_id}/channels")
+        if r.status_code != 200:
+            # Bot likely not in this guild.
+            await _patch_original(
+                interaction_token,
+                "❌ Raid failed — the bot isn't in this server, or I can't read its channels.\n"
+                "Add the bot to the server (with **Send Messages** permission) and try again.",
+            )
+            return
+
+        channels = r.json() or []
+        # type 0 = GUILD_TEXT, type 5 = GUILD_ANNOUNCEMENT
+        text_channels = [c for c in channels if c.get("type") in (0, 5)]
+
+        reached = 0
+        failed = 0
+        for ch in text_channels:
+            ch_id = ch.get("id")
+            ok_any = False
+            for i in range(5):
+                if i > 0:
+                    await asyncio.sleep(0.5)
+                try:
+                    rr = await http.post(
+                        f"{DISCORD_API}/channels/{ch_id}/messages",
+                        json={"content": message, "allowed_mentions": {"parse": []}},
+                    )
+                    if rr.status_code < 300:
+                        ok_any = True
+                    elif rr.status_code == 429:
+                        # rate-limited — back off using retry_after if present
+                        try:
+                            retry = float(rr.json().get("retry_after", 1.0))
+                        except Exception:
+                            retry = 1.0
+                        await asyncio.sleep(min(retry, 5.0))
+                except Exception as e:
+                    logging.warning(f"raid post to {ch_id} failed: {e}")
+            if ok_any:
+                reached += 1
+            else:
+                failed += 1
+
+        # Final ephemeral summary
+        summary = f"✅ Raid complete — reached **{reached}** channel(s)"
+        if failed:
+            summary += f", failed in **{failed}** (likely no Send-Messages permission)"
+        await _patch_original_with_client(http, webhook_base, summary)
+
+
+async def _patch_original_with_client(http: httpx.AsyncClient, webhook_base: str, content: str):
+    try:
+        await http.patch(f"{webhook_base}/messages/@original", json={"content": content})
+    except Exception as e:
+        logging.warning(f"patch @original failed: {e}")
+
+
+async def _patch_original(interaction_token: str, content: str):
+    base = f"{DISCORD_API}/webhooks/{DISCORD_APPLICATION_ID}/{interaction_token}"
+    async with httpx.AsyncClient(timeout=15.0) as http:
+        await _patch_original_with_client(http, base, content)
+
+
 # ---------- API routes ----------
 @api_router.get("/")
 async def root():
@@ -277,6 +366,57 @@ async def discord_interactions(
                 },
             }
 
+        if name == "raid":
+            if not bot_is_alive():
+                return {
+                    "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
+                    "data": {
+                        "content": "🛑 Loop bot is offline. Open the dashboard and click **Start Bot** to wake me up.",
+                        "flags": 64,
+                    },
+                }
+
+            guild_id = payload.get("guild_id")
+            if not guild_id:
+                return {
+                    "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
+                    "data": {
+                        "content": "`/raid` can only be used inside a server.",
+                        "flags": 64,
+                    },
+                }
+
+            options = data.get("options") or []
+            message = ""
+            for opt in options:
+                if opt.get("name") == "message":
+                    message = str(opt.get("value", "")).strip()
+                    break
+            if not message:
+                return {
+                    "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
+                    "data": {"content": "You must supply a message.", "flags": 64},
+                }
+
+            try:
+                await log_usage(payload, f"/raid {message}")
+            except Exception as e:
+                logging.exception(f"Log usage failed: {e}")
+
+            interaction_token = payload["token"]
+            task = asyncio.create_task(run_raid(interaction_token, guild_id, message))
+            _BG_TASKS.add(task)
+            task.add_done_callback(_BG_TASKS.discard)
+
+            return {
+                "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
+                "data": {
+                    "content": f"🚨 Raiding every channel with: `{message[:80]}`\nWorking…",
+                    "flags": 64,
+                    "allowed_mentions": {"parse": []},
+                },
+            }
+
         return {
             "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
             "data": {"content": "Unknown command.", "flags": 64},
@@ -323,6 +463,21 @@ async def register_commands():
             "integration_types": [0, 1],
             "contexts": [0, 1, 2],
         },
+        {
+            "name": "raid",
+            "type": 1,
+            "description": "Send a message 5x in EVERY text channel of this server.",
+            "options": [
+                {
+                    "type": 3,  # STRING
+                    "name": "message",
+                    "description": "The message to send everywhere.",
+                    "required": True,
+                }
+            ],
+            "integration_types": [0, 1],
+            "contexts": [0],  # guild-only
+        },
     ]
 
     url = f"{DISCORD_API}/applications/{DISCORD_APPLICATION_ID}/commands"
@@ -344,6 +499,22 @@ async def install_link():
         f"?client_id={DISCORD_APPLICATION_ID}"
         f"&integration_type=1"
         f"&scope=applications.commands"
+    )
+    return {"url": url}
+
+
+@api_router.get("/discord/bot-install-link")
+async def bot_install_link():
+    """
+    Install URL to ADD the bot to a server. Required for /raid because the bot
+    must be a guild member with Send Messages permission to post in channels.
+    permissions=2048 = SEND_MESSAGES (0x800)
+    """
+    url = (
+        f"https://discord.com/oauth2/authorize"
+        f"?client_id={DISCORD_APPLICATION_ID}"
+        f"&scope=bot+applications.commands"
+        f"&permissions=2048"
     )
     return {"url": url}
 
