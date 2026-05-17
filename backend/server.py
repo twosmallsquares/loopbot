@@ -36,6 +36,18 @@ verify_key = VerifyKey(bytes.fromhex(DISCORD_PUBLIC_KEY))
 # Keep strong references to background tasks so they aren't GC'd mid-flight.
 _BG_TASKS: set = set()
 
+# Bot on/off state. Defaults to ON so the bot is 24/7 out of the box.
+# The dashboard has a manual kill switch (start/stop) but no longer depends
+# on browser heartbeats to stay alive.
+bot_state: dict = {
+    "is_running": True,
+    "started_at": datetime.now(timezone.utc),
+}
+
+
+def bot_is_alive() -> bool:
+    return bool(bot_state["is_running"])
+
 # App + router
 app = FastAPI(title="Quintuple — Discord Bot")
 api_router = APIRouter(prefix="/api")
@@ -135,6 +147,16 @@ async def discord_interactions(
         data = payload.get("data") or {}
         name = data.get("name")
         if name == "use":
+            # Gate on bot state — must be started AND a browser heartbeat within window.
+            if not bot_is_alive():
+                return {
+                    "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
+                    "data": {
+                        "content": "🛑 Quintuple is offline. Open the dashboard and click **Start Bot** to wake me up.",
+                        "flags": 64,  # ephemeral
+                    },
+                }
+
             # Extract message option
             options = data.get("options") or []
             message = "hello"
@@ -211,6 +233,39 @@ async def install_link():
         f"&scope=applications.commands"
     )
     return {"url": url}
+
+
+# ---------- Bot on/off control (browser-driven) ----------
+@api_router.post("/bot/start")
+async def bot_start():
+    bot_state["is_running"] = True
+    bot_state["started_at"] = datetime.now(timezone.utc)
+    return {"is_running": True, "alive": bot_is_alive()}
+
+
+@api_router.post("/bot/stop")
+async def bot_stop():
+    bot_state["is_running"] = False
+    bot_state["started_at"] = None
+    return {"is_running": False, "alive": False}
+
+
+@api_router.post("/bot/heartbeat")
+async def bot_heartbeat():
+    # Kept for backward compatibility with the dashboard; no longer required.
+    return {"is_running": bot_state["is_running"], "alive": bot_is_alive()}
+
+
+@api_router.get("/bot/status")
+async def bot_status():
+    started = bot_state["started_at"]
+    return {
+        "is_running": bot_state["is_running"],
+        "alive": bot_is_alive(),
+        "started_at": started.isoformat() if started else None,
+        "mode": "24/7",
+    }
+
 
 
 @api_router.get("/usage/stats", response_model=StatsResponse)

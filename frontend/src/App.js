@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import "@/App.css";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import axios from "axios";
@@ -6,7 +6,18 @@ import { Toaster, toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Copy, Check, Zap, Link2, Send, BookOpen, RefreshCw } from "lucide-react";
+import {
+  Copy,
+  Check,
+  Zap,
+  Link2,
+  Send,
+  BookOpen,
+  RefreshCw,
+  Power,
+  PowerOff,
+  AlertTriangle,
+} from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -65,19 +76,49 @@ const Home = () => {
   const [recent, setRecent] = useState([]);
   const [registering, setRegistering] = useState(false);
   const [installUrl, setInstallUrl] = useState("");
+  const [botStatus, setBotStatus] = useState({ is_running: false, alive: false });
+  const [toggling, setToggling] = useState(false);
 
   const loadAll = async () => {
     try {
-      const [s, r, i] = await Promise.all([
+      const [s, r, i, b] = await Promise.all([
         axios.get(`${API}/usage/stats`),
         axios.get(`${API}/usage/recent?limit=10`),
         axios.get(`${API}/discord/install-link`),
+        axios.get(`${API}/bot/status`),
       ]);
       setStats(s.data);
       setRecent(r.data);
       setInstallUrl(i.data.url);
+      setBotStatus(b.data);
     } catch (e) {
       console.error(e);
+    }
+  };
+
+  const startBot = async () => {
+    setToggling(true);
+    try {
+      const { data } = await axios.post(`${API}/bot/start`);
+      setBotStatus((prev) => ({ ...prev, ...data }));
+      toast.success("Bot is online (24/7).");
+    } catch (e) {
+      toast.error("Start failed: " + e.message);
+    } finally {
+      setToggling(false);
+    }
+  };
+
+  const stopBot = async () => {
+    setToggling(true);
+    try {
+      const { data } = await axios.post(`${API}/bot/stop`);
+      setBotStatus((prev) => ({ ...prev, ...data }));
+      toast("Bot stopped (kill switch).");
+    } catch (e) {
+      toast.error("Stop failed: " + e.message);
+    } finally {
+      setToggling(false);
     }
   };
 
@@ -99,15 +140,13 @@ const Home = () => {
     }
   };
 
-  const lastUsed = stats.last_used
-    ? new Date(stats.last_used).toLocaleString()
-    : "—";
+  const lastUsed = stats.last_used ? new Date(stats.last_used).toLocaleString() : "—";
+  const alive = botStatus.alive;
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100" data-testid="home-page">
       <Toaster theme="dark" position="top-right" />
 
-      {/* Background grid */}
       <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_30%_-10%,rgba(16,185,129,0.12),transparent_40%),radial-gradient(circle_at_80%_110%,rgba(99,102,241,0.10),transparent_40%)]" />
 
       <div className="relative mx-auto max-w-6xl px-6 py-12 sm:py-16">
@@ -126,15 +165,87 @@ const Home = () => {
           </div>
           <Badge
             variant="outline"
-            className="border-emerald-500/30 bg-emerald-500/10 font-mono text-xs text-emerald-300"
+            className={
+              alive
+                ? "border-emerald-500/30 bg-emerald-500/10 font-mono text-xs text-emerald-300"
+                : "border-zinc-700 bg-zinc-900 font-mono text-xs text-zinc-400"
+            }
             data-testid="status-badge"
           >
-            ● ONLINE
+            {alive ? "● ONLINE" : "○ OFFLINE"}
           </Badge>
         </header>
 
+        {/* Power control card */}
+        <section className="mt-10" data-testid="power-card">
+          <Card
+            className={
+              "border bg-zinc-900/40 " +
+              (alive ? "border-emerald-500/30" : "border-zinc-800")
+            }
+          >
+            <CardContent className="flex flex-col items-start justify-between gap-6 p-6 sm:flex-row sm:items-center">
+              <div className="flex items-center gap-4">
+                <div
+                  className={
+                    "flex h-14 w-14 items-center justify-center rounded-full ring-1 " +
+                    (alive
+                      ? "bg-emerald-500/15 ring-emerald-500/40"
+                      : "bg-zinc-800/60 ring-zinc-700")
+                  }
+                >
+                  {alive ? (
+                    <Power className="h-6 w-6 text-emerald-400" />
+                  ) : (
+                    <PowerOff className="h-6 w-6 text-zinc-500" />
+                  )}
+                </div>
+                <div>
+                  <p className="font-mono text-xs uppercase tracking-[0.18em] text-zinc-500">
+                    bot power · 24/7
+                  </p>
+                  <p className="mt-1 text-lg text-zinc-100" data-testid="power-status-text">
+                    {alive
+                      ? "Online — running 24/7"
+                      : "Offline — kill switch is active"}
+                  </p>
+                </div>
+              </div>
+
+              {alive ? (
+                <Button
+                  onClick={stopBot}
+                  disabled={toggling}
+                  className="bg-red-500 text-zinc-950 hover:bg-red-400"
+                  data-testid="stop-bot-btn"
+                >
+                  <PowerOff className="mr-2 h-4 w-4" /> Stop Bot
+                </Button>
+              ) : (
+                <Button
+                  onClick={startBot}
+                  disabled={toggling}
+                  size="lg"
+                  className="bg-emerald-500 text-zinc-950 hover:bg-emerald-400"
+                  data-testid="start-bot-btn"
+                >
+                  <Power className="mr-2 h-5 w-5" /> Start Bot
+                </Button>
+              )}
+            </CardContent>
+          </Card>
+
+          <p className="mt-3 flex items-start gap-2 text-xs text-zinc-500">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-400/80" />
+            <span>
+              Bot is online 24/7 by default. <b>Stop</b> is a manual kill switch — use it if you
+              want to silence the bot without changing Discord settings.
+            </span>
+          </p>
+        </section>
+
         {/* Hero */}
-        <section className="mt-16 max-w-3xl" data-testid="hero">
+        <section className="mt-14 max-w-3xl" data-testid="hero">
           <h2 className="font-mono text-4xl font-semibold leading-tight text-zinc-100 sm:text-5xl lg:text-6xl">
             One slash. <span className="text-emerald-400">Five echoes.</span>
           </h2>
@@ -143,15 +254,15 @@ const Home = () => {
             <code className="rounded bg-zinc-900 px-2 py-0.5 font-mono text-sm text-emerald-300">
               /use message:hi
             </code>{" "}
-            in any channel and your message fires off 5 times, 500ms apart. No server install
-            required — works anywhere external apps are allowed.
+            in any channel and your message fires 5 times, 500ms apart.
           </p>
 
           <div className="mt-8 flex flex-wrap items-center gap-3">
             <Button
               onClick={registerCmd}
               disabled={registering}
-              className="bg-emerald-500 text-zinc-950 hover:bg-emerald-400"
+              variant="outline"
+              className="border-zinc-800 bg-zinc-900 text-zinc-200 hover:bg-zinc-800"
               data-testid="register-command-btn"
             >
               {registering ? (
@@ -202,25 +313,29 @@ const Home = () => {
                   Discord Developer Portal
                 </a>{" "}
                 → your app → <b>General Information</b>, paste this URL into{" "}
-                <b>Interactions Endpoint URL</b>:
+                <b>Interactions Endpoint URL</b> and save:
                 <div className="mt-3">
                   <CopyField label="endpoint" value={INTERACTIONS_URL} testId="endpoint" />
                 </div>
+                <p className="mt-2 text-xs text-amber-300/80">
+                  If you previously pasted a different URL, replace it with this one — that's the
+                  cause of "application didn't respond".
+                </p>
               </Step>
               <Step n="2" title="Enable User Install">
                 In <b>Installation</b> tab, set <b>Install Link</b> to <i>Discord Provided</i> and
                 enable <b>User Install</b> under <b>Installation Contexts</b>.
               </Step>
               <Step n="3" title="Register the /use command">
-                Click the <b>Register /use globally</b> button above. Discord may take a few minutes
-                to propagate the global command.
+                Click <b>Register /use globally</b>. (Already done once — re-run if you change the
+                command.)
               </Step>
-              <Step n="4" title="Install it on your account">
-                Use the <b>Add to your account</b> button. After that, type{" "}
+              <Step n="4" title="Install + Start">
+                Use <b>Add to your account</b>, then press <b>Start Bot</b> above. Type{" "}
                 <code className="rounded bg-zinc-950 px-1.5 py-0.5 font-mono text-emerald-300">
                   /use
                 </code>{" "}
-                anywhere — even servers where the bot isn't added.
+                anywhere in Discord.
               </Step>
             </CardContent>
           </Card>
@@ -260,7 +375,43 @@ const Home = () => {
         </section>
 
         <footer className="mt-16 border-t border-zinc-900 pt-6 text-center font-mono text-xs text-zinc-600">
-          quintuple · runs on http interactions · no hosting on your side
+          quintuple · http interactions · stay-open-to-stay-online
+        </footer>
+      </div>
+    </div>
+  );
+};
+
+function App() {
+  return (
+    <div className="App">
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={<Home />} />
+        </Routes>
+      </BrowserRouter>
+    </div>
+  );
+}
+
+export default App;
+e || "unknown"}
+                        </span>
+                        <span className="font-mono text-[10px] text-zinc-500">
+                          {new Date(r.timestamp).toLocaleTimeString()}
+                        </span>
+                      </div>
+                      <p className="mt-1 line-clamp-2 text-sm text-zinc-300">{r.message}</p>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </CardContent>
+          </Card>
+        </section>
+
+        <footer className="mt-16 border-t border-zinc-900 pt-6 text-center font-mono text-xs text-zinc-600">
+          quintuple · http interactions · stay-open-to-stay-online
         </footer>
       </div>
     </div>
