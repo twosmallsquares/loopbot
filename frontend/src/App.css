@@ -1,0 +1,16 @@
+.App {
+    min-height: 100vh;
+}
+
+code {
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+body {
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+::selection {
+    background: rgba(16, 185, 129, 0.25);
+    color: #ecfdf5;
+}
