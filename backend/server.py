@@ -90,10 +90,33 @@ class StatsResponse(BaseModel):
 # ---------- Discord interaction types ----------
 INTERACTION_PING = 1
 INTERACTION_APP_COMMAND = 2
+INTERACTION_MESSAGE_COMPONENT = 3
 
 RESP_PONG = 1
 RESP_CHANNEL_MESSAGE_WITH_SOURCE = 4
 RESP_DEFERRED_CHANNEL_MESSAGE = 5
+RESP_DEFERRED_UPDATE_MESSAGE = 6
+RESP_UPDATE_MESSAGE = 7
+
+MENU_MAX = 45
+
+
+def public_content(message: str, ping: bool) -> tuple[str, dict]:
+    """Build (content, allowed_mentions) for a PUBLIC bot message.
+    Appends the invite. Prefixes @everyone when ping=True.
+    """
+    body = with_ad(message)
+    if ping:
+        body = "@everyone\n" + body
+        return body, {"parse": ["everyone"]}
+    return body, {"parse": []}
+
+
+def get_option(options: list, name: str, default=None):
+    for opt in options or []:
+        if opt.get("name") == name:
+            return opt.get("value", default)
+    return default
 
 
 # ---------- Helpers ----------
@@ -110,7 +133,13 @@ async def log_usage(payload: dict, message: str) -> None:
     await db.usage_logs.insert_one(doc)
 
 
-async def send_followups(interaction_token: str, message: str, count: int = 5, delay: float = 0.5):
+async def send_followups(
+    interaction_token: str,
+    message: str,
+    count: int = 5,
+    delay: float = 0.5,
+    ping: bool = False,
+):
     """
     Fetch the original (ephemeral) interaction response and send `count` PUBLIC
     followup messages that reply to it via `message_reference`. Viewers who can't
@@ -118,11 +147,12 @@ async def send_followups(interaction_token: str, message: str, count: int = 5, d
     invoker sees a clean reply chain.
     """
     base = f"{DISCORD_API}/webhooks/{DISCORD_APPLICATION_ID}/{interaction_token}"
+    content, mentions = public_content(message, ping)
     async with httpx.AsyncClient(timeout=15.0) as http:
         original_id = await _fetch_original_id(http, base)
         for _ in range(count):
             await asyncio.sleep(delay)
-            body: dict = {"content": with_ad(message)}
+            body: dict = {"content": content, "allowed_mentions": mentions}
             if original_id:
                 body["message_reference"] = {
                     "type": 0,
@@ -150,17 +180,21 @@ async def _fetch_original_id(http: httpx.AsyncClient, base: str) -> Optional[str
     return None
 
 
-async def send_blame_followup(interaction_token: str, user_id: str):
+async def send_blame_followup(interaction_token: str, user_id: str, ping: bool = False):
     """One public followup replying to the ephemeral 'Blaming @user...' message."""
     base = f"{DISCORD_API}/webhooks/{DISCORD_APPLICATION_ID}/{interaction_token}"
-    body_text = with_ad(
-        f"**Thank you <@{user_id}> for choosing loop bot**\n```\n✅ Success\n```"
-    )
+    raw = f"**Thank you <@{user_id}> for choosing loop bot**\n```\n✅ Success\n```"
+    if ping:
+        raw = "@everyone\n" + raw
+    body_text = with_ad(raw)
+    mentions: dict = {"users": [user_id]}
+    if ping:
+        mentions["parse"] = ["everyone"]
     async with httpx.AsyncClient(timeout=15.0) as http:
         original_id = await _fetch_original_id(http, base)
         body: dict = {
             "content": body_text,
-            "allowed_mentions": {"users": [user_id]},
+            "allowed_mentions": mentions,
         }
         if original_id:
             body["message_reference"] = {
@@ -216,41 +250,38 @@ async def discord_interactions(
         data = payload.get("data") or {}
         name = data.get("name")
         if name == "use":
-            # Gate on bot state — must be started AND a browser heartbeat within window.
             if not bot_is_alive():
                 return {
                     "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
                     "data": {
                         "content": "🛑 Quintuple is offline. Open the dashboard and click **Start Bot** to wake me up.",
-                        "flags": 64,  # ephemeral
+                        "flags": 64,
                     },
                 }
 
-            # Extract message option
             options = data.get("options") or []
-            message = "hello"
-            for opt in options:
-                if opt.get("name") == "message":
-                    message = str(opt.get("value", "hello"))
-                    break
+            message = str(get_option(options, "message", "hello"))
+            ping = bool(get_option(options, "ping", False))
 
-            # Log usage (non-blocking awaited write — fast)
             try:
                 await log_usage(payload, message)
             except Exception as e:
                 logging.exception(f"Log usage failed: {e}")
 
-            # Schedule 5 public followups that REPLY to the ephemeral initial
-            # response. The invoker sees the reply chain; others see
-            # "Original message was deleted" with the reply content visible.
             interaction_token = payload["token"]
-            task = asyncio.create_task(send_followups(interaction_token, message, count=5, delay=0.5))
+            task = asyncio.create_task(
+                send_followups(interaction_token, message, count=5, delay=0.5, ping=ping)
+            )
             _BG_TASKS.add(task)
             task.add_done_callback(_BG_TASKS.discard)
 
             return {
                 "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
-                "data": {"content": with_ad(message), "flags": 64},  # 64 = ephemeral
+                "data": {
+                    "content": with_ad(message),
+                    "flags": 64,
+                    "allowed_mentions": {"parse": []},
+                },
             }
 
         if name == "blame":
@@ -269,6 +300,7 @@ async def discord_interactions(
                 if opt.get("name") == "user" and opt.get("type") == 6:
                     target_user_id = str(opt.get("value"))
                     break
+            ping = bool(get_option(options, "ping", False))
 
             if not target_user_id:
                 return {
@@ -276,14 +308,15 @@ async def discord_interactions(
                     "data": {"content": "You must pick a user to blame.", "flags": 64},
                 }
 
-            # Log usage
             try:
                 await log_usage(payload, f"/blame <@{target_user_id}>")
             except Exception as e:
                 logging.exception(f"Log usage failed: {e}")
 
             interaction_token = payload["token"]
-            task = asyncio.create_task(send_blame_followup(interaction_token, target_user_id))
+            task = asyncio.create_task(
+                send_blame_followup(interaction_token, target_user_id, ping=ping)
+            )
             _BG_TASKS.add(task)
             task.add_done_callback(_BG_TASKS.discard)
 
@@ -291,8 +324,8 @@ async def discord_interactions(
                 "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
                 "data": {
                     "content": with_ad(f"Blaming <@{target_user_id}>..."),
-                    "flags": 64,  # ephemeral — only invoker sees
-                    "allowed_mentions": {"parse": []},  # don't ping in the ephemeral
+                    "flags": 64,
+                    "allowed_mentions": {"parse": []},
                 },
             }
 
@@ -309,6 +342,8 @@ async def discord_interactions(
             options = data.get("options") or []
             sub = options[0] if options else {}
             sub_name = sub.get("name")
+            sub_options = sub.get("options") or []
+            ping = bool(get_option(sub_options, "ping", False))
 
             if sub_name == "embed":
                 template_text = TEMPLATE_EMBED
@@ -325,14 +360,63 @@ async def discord_interactions(
 
             interaction_token = payload["token"]
             task = asyncio.create_task(
-                send_followups(interaction_token, template_text, count=5, delay=0.5)
+                send_followups(interaction_token, template_text, count=5, delay=0.5, ping=ping)
             )
             _BG_TASKS.add(task)
             task.add_done_callback(_BG_TASKS.discard)
 
             return {
                 "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
-                "data": {"content": with_ad(template_text), "flags": 64},
+                "data": {
+                    "content": with_ad(template_text),
+                    "flags": 64,
+                    "allowed_mentions": {"parse": []},
+                },
+            }
+
+        if name == "menu":
+            if not bot_is_alive():
+                return {
+                    "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
+                    "data": {
+                        "content": "🛑 Loop bot is offline.",
+                        "flags": 64,
+                    },
+                }
+
+            options = data.get("options") or []
+            message = str(get_option(options, "message", "")).strip()
+            ping = bool(get_option(options, "ping", False))
+            if not message:
+                return {
+                    "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
+                    "data": {"content": "Provide a message.", "flags": 64},
+                }
+
+            user = (payload.get("member") or {}).get("user") or payload.get("user") or {}
+            state_id = str(uuid.uuid4())
+            await db.menu_states.insert_one({
+                "id": state_id,
+                "user_id": user.get("id"),
+                "message": message,
+                "ping": ping,
+                "count": 0,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+
+            try:
+                await log_usage(payload, f"/menu {message}")
+            except Exception as e:
+                logging.exception(f"Log usage failed: {e}")
+
+            return {
+                "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
+                "data": {
+                    "content": _menu_display(message, ping, 0),
+                    "flags": 64,
+                    "allowed_mentions": {"parse": []},
+                    "components": _menu_components(state_id),
+                },
             }
 
         return {
@@ -340,7 +424,114 @@ async def discord_interactions(
             "data": {"content": "Unknown command.", "flags": 64},
         }
 
+    # 4. Message component (button click)
+    if itype == INTERACTION_MESSAGE_COMPONENT:
+        return await _handle_component(payload)
+
     return JSONResponse(status_code=400, content={"error": "Unhandled interaction type"})
+
+
+def _menu_display(message: str, ping: bool, count: int) -> str:
+    ping_str = "Yes (will @everyone)" if ping else "No"
+    msg_preview = message if len(message) <= 200 else message[:200] + "…"
+    return (
+        f"🎯 **Menu queued**\n"
+        f"Message: `{msg_preview}`\n"
+        f"Ping: **{ping_str}**\n"
+        f"Count: **{count} / {MENU_MAX}**\n\n"
+        f"Click **Add** to queue more. Click **Release** to fire."
+    )
+
+
+def _menu_components(state_id: str) -> list:
+    return [
+        {
+            "type": 1,  # ACTION_ROW
+            "components": [
+                {
+                    "type": 2,  # BUTTON
+                    "style": 1,  # PRIMARY (blue)
+                    "label": "Add",
+                    "custom_id": f"menu:{state_id}:add",
+                },
+                {
+                    "type": 2,
+                    "style": 4,  # DANGER (red)
+                    "label": "Release",
+                    "custom_id": f"menu:{state_id}:release",
+                },
+            ],
+        }
+    ]
+
+
+async def _handle_component(payload: dict) -> dict:
+    data = payload.get("data") or {}
+    custom_id = data.get("custom_id", "")
+    parts = custom_id.split(":")
+    if len(parts) != 3 or parts[0] != "menu":
+        return {
+            "type": RESP_UPDATE_MESSAGE,
+            "data": {"content": "Unknown button.", "components": []},
+        }
+    _, state_id, action = parts
+
+    user = (payload.get("member") or {}).get("user") or payload.get("user") or {}
+    state = await db.menu_states.find_one({"id": state_id}, {"_id": 0})
+    if not state:
+        return {
+            "type": RESP_UPDATE_MESSAGE,
+            "data": {"content": "❌ Menu expired or not found.", "components": []},
+        }
+    if state.get("user_id") and user.get("id") and state["user_id"] != user.get("id"):
+        return {
+            "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
+            "data": {"content": "This menu isn't yours.", "flags": 64},
+        }
+
+    if action == "add":
+        new_count = min(int(state.get("count", 0)) + 1, MENU_MAX)
+        await db.menu_states.update_one({"id": state_id}, {"$set": {"count": new_count}})
+        return {
+            "type": RESP_UPDATE_MESSAGE,
+            "data": {
+                "content": _menu_display(state["message"], state["ping"], new_count),
+                "components": _menu_components(state_id),
+                "allowed_mentions": {"parse": []},
+            },
+        }
+
+    if action == "release":
+        count = int(state.get("count", 0))
+        if count <= 0:
+            return {
+                "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
+                "data": {"content": "Queue is empty. Click **Add** first.", "flags": 64},
+            }
+        # Fire background task to send `count` followups
+        interaction_token = payload["token"]
+        message = state["message"]
+        ping = bool(state.get("ping", False))
+        task = asyncio.create_task(
+            send_followups(interaction_token, message, count=count, delay=0.5, ping=ping)
+        )
+        _BG_TASKS.add(task)
+        task.add_done_callback(_BG_TASKS.discard)
+        # Clean up state
+        await db.menu_states.delete_one({"id": state_id})
+        return {
+            "type": RESP_UPDATE_MESSAGE,
+            "data": {
+                "content": f"✅ Released **{count}** message(s).\n{AD_LINK}",
+                "components": [],
+                "allowed_mentions": {"parse": []},
+            },
+        }
+
+    return {
+        "type": RESP_UPDATE_MESSAGE,
+        "data": {"content": "Unknown action.", "components": []},
+    }
 
 
 @api_router.post("/discord/register-commands")
@@ -361,7 +552,13 @@ async def register_commands():
                     "name": "message",
                     "description": "The message to send 5 times.",
                     "required": True,
-                }
+                },
+                {
+                    "type": 5,  # BOOLEAN
+                    "name": "ping",
+                    "description": "Ping @everyone with each message? Default no.",
+                    "required": False,
+                },
             ],
             "integration_types": [0, 1],
             "contexts": [0, 1, 2],
@@ -376,7 +573,13 @@ async def register_commands():
                     "name": "user",
                     "description": "The user to blame.",
                     "required": True,
-                }
+                },
+                {
+                    "type": 5,
+                    "name": "ping",
+                    "description": "Ping @everyone too? Default no.",
+                    "required": False,
+                },
             ],
             "integration_types": [0, 1],
             "contexts": [0, 1, 2],
@@ -390,7 +593,36 @@ async def register_commands():
                     "type": 1,  # SUB_COMMAND
                     "name": "embed",
                     "description": "AWW YOU GOT RAIDED gif template.",
+                    "options": [
+                        {
+                            "type": 5,
+                            "name": "ping",
+                            "description": "Ping @everyone with each message? Default no.",
+                            "required": False,
+                        }
+                    ],
                 }
+            ],
+            "integration_types": [0, 1],
+            "contexts": [0, 1, 2],
+        },
+        {
+            "name": "menu",
+            "type": 1,
+            "description": "Queue a message with Add/Release buttons (max 45).",
+            "options": [
+                {
+                    "type": 3,
+                    "name": "message",
+                    "description": "The message to queue.",
+                    "required": True,
+                },
+                {
+                    "type": 5,
+                    "name": "ping",
+                    "description": "Ping @everyone on release? Default no.",
+                    "required": False,
+                },
             ],
             "integration_types": [0, 1],
             "contexts": [0, 1, 2],

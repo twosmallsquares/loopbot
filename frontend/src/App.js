@@ -141,7 +141,7 @@ const Home = () => {
     setRegistering(true);
     try {
       await axios.post(`${API}/discord/register-commands`);
-      toast.success("Commands registered: /use, /blame, /template");
+      toast.success("Commands registered: /use, /blame, /template, /menu");
     } catch (e) {
       toast.error("Registration failed: " + (e.response?.data?.detail || e.message));
     } finally {
@@ -299,18 +299,22 @@ const Home = () => {
         </section>
 
         {/* Commands */}
-        <section className="mt-14 grid grid-cols-1 gap-3 sm:grid-cols-3" data-testid="commands-section">
+        <section className="mt-14 grid grid-cols-1 gap-3 sm:grid-cols-2" data-testid="commands-section">
           <Cmd
-            name="use message:hi"
-            desc="Sends `hi` 5 times, 500ms apart. Replies show 'Original deleted' to others."
+            name="use message:hi ping:no"
+            desc="Sends `hi` 5 times, 500ms apart. ping:yes prefixes @everyone."
           />
           <Cmd
-            name="blame user:@x"
+            name="blame user:@x ping:no"
             desc="Ephemeral 'Blaming…' then public 'Thank you @x for choosing loop bot ✅'."
           />
           <Cmd
-            name="template embed"
-            desc="'AWW YOU GOT RAIDED?' gif template, same 5x loop trick."
+            name="template embed ping:no"
+            desc="'AWW YOU GOT RAIDED?' gif template — same 5x loop."
+          />
+          <Cmd
+            name="menu message:hi ping:no"
+            desc="Ephemeral panel with Add (+1, max 45) / Release (fires N msgs) buttons."
           />
         </section>
 
@@ -352,7 +356,7 @@ const Home = () => {
               </Step>
               <Step n="3" title="Register commands">
                 Click <b>Register all commands</b>. Registers <code>/use</code>,{" "}
-                <code>/blame</code>, <code>/template</code>.
+                <code>/blame</code>, <code>/template</code>, <code>/menu</code>.
               </Step>
               <Step n="4" title="You're done">
                 Install on your account and use the commands anywhere on Discord.
