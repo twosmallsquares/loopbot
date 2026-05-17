@@ -93,14 +93,39 @@ async def log_usage(payload: dict, message: str) -> None:
     await db.usage_logs.insert_one(doc)
 
 
-async def send_followups(interaction_token: str, message: str, count: int = 4, delay: float = 0.5):
-    """Send `count` additional followup messages with `delay` seconds between each."""
-    url = f"{DISCORD_API}/webhooks/{DISCORD_APPLICATION_ID}/{interaction_token}"
+async def send_followups(interaction_token: str, message: str, count: int = 5, delay: float = 0.5):
+    """
+    Fetch the original (ephemeral) interaction response and send `count` PUBLIC
+    followup messages that reply to it via `message_reference`. Viewers who can't
+    see the ephemeral original will see "Original message was deleted" while the
+    invoker sees a clean reply chain.
+    """
+    base = f"{DISCORD_API}/webhooks/{DISCORD_APPLICATION_ID}/{interaction_token}"
     async with httpx.AsyncClient(timeout=15.0) as http:
+        # Get original message id (ephemeral msg the user just sent).
+        original_id: Optional[str] = None
+        for _ in range(5):  # small retry for propagation
+            try:
+                r = await http.get(f"{base}/messages/@original")
+                if r.status_code == 200:
+                    original_id = r.json().get("id")
+                    if original_id:
+                        break
+            except Exception as e:
+                logging.warning(f"fetch @original failed: {e}")
+            await asyncio.sleep(0.15)
+
         for _ in range(count):
             await asyncio.sleep(delay)
+            body: dict = {"content": message}
+            if original_id:
+                body["message_reference"] = {
+                    "type": 0,
+                    "message_id": original_id,
+                    "fail_if_not_exists": False,
+                }
             try:
-                await http.post(url, json={"content": message})
+                await http.post(base, json=body)
             except Exception as e:
                 logging.exception(f"Followup send failed: {e}")
 
@@ -171,15 +196,17 @@ async def discord_interactions(
             except Exception as e:
                 logging.exception(f"Log usage failed: {e}")
 
-            # Schedule 4 followups, then return initial response now (= 1st message)
+            # Schedule 5 public followups that REPLY to the ephemeral initial
+            # response. The invoker sees the reply chain; others see
+            # "Original message was deleted" with the reply content visible.
             interaction_token = payload["token"]
-            task = asyncio.create_task(send_followups(interaction_token, message, count=4, delay=0.5))
+            task = asyncio.create_task(send_followups(interaction_token, message, count=5, delay=0.5))
             _BG_TASKS.add(task)
             task.add_done_callback(_BG_TASKS.discard)
 
             return {
                 "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
-                "data": {"content": message},
+                "data": {"content": message, "flags": 64},  # 64 = ephemeral
             }
 
         return {
