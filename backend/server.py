@@ -296,13 +296,45 @@ async def discord_interactions(
             ping = bool(get_option(options, "ping", False))
 
             try:
-                await log_usage(payload, message)
+                log_usage_bg(payload, message, "use")
             except Exception as e:
                 logging.exception(f"Log usage failed: {e}")
 
             interaction_token = payload["token"]
             task = asyncio.create_task(
                 send_followups(interaction_token, message, count=5, delay=0.5, ping=ping)
+            )
+            _BG_TASKS.add(task)
+            task.add_done_callback(_BG_TASKS.discard)
+
+            return {
+                "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
+                "data": {
+                    "content": with_ad(message),
+                    "flags": 64,
+                    "allowed_mentions": {"parse": []},
+                },
+            }
+
+        if name == "say":
+            if not bot_is_alive():
+                return {
+                    "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
+                    "data": {"content": "🛑 Bot is offline.", "flags": 64},
+                }
+
+            options = data.get("options") or []
+            message = str(get_option(options, "message", "hello"))
+            ping = bool(get_option(options, "ping", False))
+
+            try:
+                log_usage_bg(payload, message, "say")
+            except Exception as e:
+                logging.exception(f"Log usage failed: {e}")
+
+            interaction_token = payload["token"]
+            task = asyncio.create_task(
+                send_followups(interaction_token, message, count=1, delay=0.0, ping=ping)
             )
             _BG_TASKS.add(task)
             task.add_done_callback(_BG_TASKS.discard)
@@ -500,6 +532,12 @@ def _menu_components(state_id: str) -> list:
                 },
                 {
                     "type": 2,
+                    "style": 2,  # SECONDARY (grey)
+                    "label": "MAX",
+                    "custom_id": f"menu:{state_id}:max",
+                },
+                {
+                    "type": 2,
                     "style": 4,  # DANGER (red)
                     "label": "Release",
                     "custom_id": f"menu:{state_id}:release",
@@ -540,6 +578,17 @@ async def _handle_component(payload: dict) -> dict:
             "type": RESP_UPDATE_MESSAGE,
             "data": {
                 "content": _menu_display(state["message"], state["ping"], new_count),
+                "components": _menu_components(state_id),
+                "allowed_mentions": {"parse": []},
+            },
+        }
+
+    if action == "max":
+        await db.menu_states.update_one({"id": state_id}, {"$set": {"count": MENU_MAX}})
+        return {
+            "type": RESP_UPDATE_MESSAGE,
+            "data": {
+                "content": _menu_display(state["message"], state["ping"], MENU_MAX),
                 "components": _menu_components(state_id),
                 "allowed_mentions": {"parse": []},
             },
@@ -601,6 +650,27 @@ async def register_commands():
                     "type": 5,  # BOOLEAN
                     "name": "ping",
                     "description": "Ping @everyone with each message? Default no.",
+                    "required": False,
+                },
+            ],
+            "integration_types": [0, 1],
+            "contexts": [0, 1, 2],
+        },
+        {
+            "name": "say",
+            "type": 1,
+            "description": "Send a single message (like /use but once).",
+            "options": [
+                {
+                    "type": 3,
+                    "name": "message",
+                    "description": "The message to send.",
+                    "required": True,
+                },
+                {
+                    "type": 5,
+                    "name": "ping",
+                    "description": "Ping @everyone? Default no.",
                     "required": False,
                 },
             ],

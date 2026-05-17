@@ -143,7 +143,7 @@ const Home = () => {
     setRegistering(true);
     try {
       await axios.post(`${API}/discord/register-commands`);
-      toast.success("Commands registered: /use, /blame, /template, /menu");
+      toast.success("Commands registered: /use, /say, /blame, /template, /menu");
     } catch (e) {
       toast.error("Registration failed: " + (e.response?.data?.detail || e.message));
     } finally {
@@ -313,10 +313,14 @@ const Home = () => {
         </section>
 
         {/* Commands */}
-        <section className="mt-14 grid grid-cols-1 gap-3 sm:grid-cols-2" data-testid="commands-section">
+        <section className="mt-14 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3" data-testid="commands-section">
           <Cmd
             name="use message:hi ping:no"
             desc="Sends `hi` 5 times, 500ms apart. ping:yes prefixes @everyone."
+          />
+          <Cmd
+            name="say message:hi ping:no"
+            desc="Sends `hi` once. Same loop trick, just one message."
           />
           <Cmd
             name="blame user:@x ping:no"
@@ -328,7 +332,7 @@ const Home = () => {
           />
           <Cmd
             name="menu message:hi ping:no"
-            desc="Ephemeral panel with Add (+1, max 45) / Release (fires N msgs) buttons."
+            desc="Ephemeral panel with Add / MAX (jump to 45) / Release buttons."
           />
         </section>
 
@@ -370,7 +374,8 @@ const Home = () => {
               </Step>
               <Step n="3" title="Register commands">
                 Click <b>Register all commands</b>. Registers <code>/use</code>,{" "}
-                <code>/blame</code>, <code>/template</code>, <code>/menu</code>.
+                <code>/say</code>, <code>/blame</code>, <code>/template</code>,{" "}
+                <code>/menu</code>.
               </Step>
               <Step n="4" title="You're done">
                 Install on your account and use the commands anywhere on Discord.
