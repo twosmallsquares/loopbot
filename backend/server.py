@@ -30,6 +30,7 @@ DISCORD_BOT_TOKEN = os.environ['DISCORD_BOT_TOKEN']
 DISCORD_PUBLIC_KEY = os.environ['DISCORD_PUBLIC_KEY']
 DISCORD_APPLICATION_ID = os.environ['DISCORD_APPLICATION_ID']
 DISCORD_API = "https://discord.com/api/v10"
+ADMIN_PASSWORD = os.environ['ADMIN_PASSWORD']
 
 # Advertisement appended to every bot message.
 AD_LINK = "https://discord.gg/hAMTVDSmd8"
@@ -120,7 +121,7 @@ def get_option(options: list, name: str, default=None):
 
 
 # ---------- Helpers ----------
-async def log_usage(payload: dict, message: str) -> None:
+async def log_usage(payload: dict, message: str, command: str = "") -> None:
     user = (payload.get("member") or {}).get("user") or payload.get("user") or {}
     doc = UsageLog(
         user_id=user.get("id"),
@@ -130,7 +131,27 @@ async def log_usage(payload: dict, message: str) -> None:
         message=message,
     ).model_dump()
     doc['timestamp'] = doc['timestamp'].isoformat()
+    doc['command'] = command
     await db.usage_logs.insert_one(doc)
+
+
+def log_usage_bg(payload: dict, message: str, command: str = "") -> None:
+    """Fire-and-forget version — keeps the interaction response under Discord's 3s deadline."""
+    t = asyncio.create_task(log_usage(payload, message, command))
+    _BG_TASKS.add(t)
+    t.add_done_callback(_BG_TASKS.discard)
+
+
+async def is_blacklisted(user_id: Optional[str]) -> bool:
+    if not user_id:
+        return False
+    doc = await db.blacklist.find_one({"user_id": user_id}, {"_id": 0, "user_id": 1})
+    return doc is not None
+
+
+def invoker_id(payload: dict) -> Optional[str]:
+    user = (payload.get("member") or {}).get("user") or payload.get("user") or {}
+    return user.get("id")
 
 
 async def send_followups(
@@ -249,6 +270,17 @@ async def discord_interactions(
     if itype == INTERACTION_APP_COMMAND:
         data = payload.get("data") or {}
         name = data.get("name")
+
+        # Blacklist check (fast — single indexed lookup)
+        if await is_blacklisted(invoker_id(payload)):
+            return {
+                "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
+                "data": {
+                    "content": "🚫 You are blacklisted from using this bot.",
+                    "flags": 64,
+                },
+            }
+
         if name == "use":
             if not bot_is_alive():
                 return {
@@ -309,7 +341,7 @@ async def discord_interactions(
                 }
 
             try:
-                await log_usage(payload, f"/blame <@{target_user_id}>")
+                log_usage_bg(payload, f"/blame <@{target_user_id}>", "blame")
             except Exception as e:
                 logging.exception(f"Log usage failed: {e}")
 
@@ -354,7 +386,7 @@ async def discord_interactions(
                 }
 
             try:
-                await log_usage(payload, f"/template {sub_name}")
+                log_usage_bg(payload, f"/template {sub_name}", "template")
             except Exception as e:
                 logging.exception(f"Log usage failed: {e}")
 
@@ -395,17 +427,21 @@ async def discord_interactions(
 
             user = (payload.get("member") or {}).get("user") or payload.get("user") or {}
             state_id = str(uuid.uuid4())
-            await db.menu_states.insert_one({
+            menu_doc = {
                 "id": state_id,
                 "user_id": user.get("id"),
                 "message": message,
                 "ping": ping,
                 "count": 0,
                 "created_at": datetime.now(timezone.utc).isoformat(),
-            })
+            }
+            # Fire-and-forget the insert; it'll complete long before the user clicks Add.
+            t = asyncio.create_task(db.menu_states.insert_one(menu_doc))
+            _BG_TASKS.add(t)
+            t.add_done_callback(_BG_TASKS.discard)
 
             try:
-                await log_usage(payload, f"/menu {message}")
+                log_usage_bg(payload, f"/menu {message}", "menu")
             except Exception as e:
                 logging.exception(f"Log usage failed: {e}")
 
@@ -426,6 +462,14 @@ async def discord_interactions(
 
     # 4. Message component (button click)
     if itype == INTERACTION_MESSAGE_COMPONENT:
+        if await is_blacklisted(invoker_id(payload)):
+            return {
+                "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
+                "data": {
+                    "content": "🚫 You are blacklisted from using this bot.",
+                    "flags": 64,
+                },
+            }
         return await _handle_component(payload)
 
     return JSONResponse(status_code=400, content={"error": "Unhandled interaction type"})
@@ -719,6 +763,82 @@ async def usage_recent(limit: int = 20):
         if isinstance(d.get("timestamp"), str):
             d['timestamp'] = datetime.fromisoformat(d['timestamp'])
     return docs
+
+
+# ---------- Admin console ----------
+class AdminAuth(BaseModel):
+    password: str
+
+
+class BlacklistEntry(BaseModel):
+    user_id: str
+    username: Optional[str] = None
+    reason: Optional[str] = None
+
+
+def _check_admin(password: Optional[str]) -> None:
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Wrong password")
+
+
+@api_router.post("/admin/verify")
+async def admin_verify(body: AdminAuth):
+    _check_admin(body.password)
+    return {"ok": True}
+
+
+@api_router.get("/admin/logs")
+async def admin_logs(
+    password: str,
+    limit: int = 200,
+    user_id: Optional[str] = None,
+    guild_id: Optional[str] = None,
+):
+    _check_admin(password)
+    query: dict = {}
+    if user_id:
+        query["user_id"] = user_id
+    if guild_id:
+        query["guild_id"] = guild_id
+    docs = (
+        await db.usage_logs.find(query, {"_id": 0})
+        .sort("timestamp", -1)
+        .to_list(limit)
+    )
+    return {"logs": docs, "count": len(docs)}
+
+
+@api_router.get("/admin/blacklist")
+async def admin_blacklist(password: str):
+    _check_admin(password)
+    docs = await db.blacklist.find({}, {"_id": 0}).sort("blacklisted_at", -1).to_list(500)
+    return {"blacklist": docs}
+
+
+@api_router.post("/admin/blacklist")
+async def admin_blacklist_add(entry: BlacklistEntry, password: str):
+    _check_admin(password)
+    if not entry.user_id:
+        raise HTTPException(status_code=400, detail="user_id required")
+    doc = {
+        "user_id": entry.user_id,
+        "username": entry.username,
+        "reason": entry.reason,
+        "blacklisted_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.blacklist.update_one(
+        {"user_id": entry.user_id},
+        {"$set": doc},
+        upsert=True,
+    )
+    return {"ok": True, "entry": doc}
+
+
+@api_router.delete("/admin/blacklist/{user_id}")
+async def admin_blacklist_remove(user_id: str, password: str):
+    _check_admin(password)
+    result = await db.blacklist.delete_one({"user_id": user_id})
+    return {"ok": True, "deleted": result.deleted_count}
 
 
 # Register router + middleware

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import "@/App.css";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Link } from "react-router-dom";
 import axios from "axios";
 import { Toaster, toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -18,7 +18,9 @@ import {
   PowerOff,
   AlertTriangle,
   Megaphone,
+  Shield,
 } from "lucide-react";
+import Console from "./Console";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -171,17 +173,29 @@ const Home = () => {
               <h1 className="font-mono text-xl font-semibold text-zinc-100">quintuple</h1>
             </div>
           </div>
-          <Badge
-            variant="outline"
-            className={
-              alive
-                ? "border-emerald-500/30 bg-emerald-500/10 font-mono text-xs text-emerald-300"
-                : "border-zinc-700 bg-zinc-900 font-mono text-xs text-zinc-400"
-            }
-            data-testid="status-badge"
-          >
-            {alive ? "● ONLINE" : "○ OFFLINE"}
-          </Badge>
+          <div className="flex items-center gap-2">
+            <Link to="/console">
+              <Button
+                variant="outline"
+                size="sm"
+                className="border-zinc-800 bg-zinc-900 text-zinc-200 hover:bg-zinc-800"
+                data-testid="open-console-btn"
+              >
+                <Shield className="mr-2 h-4 w-4" /> Console
+              </Button>
+            </Link>
+            <Badge
+              variant="outline"
+              className={
+                alive
+                  ? "border-emerald-500/30 bg-emerald-500/10 font-mono text-xs text-emerald-300"
+                  : "border-zinc-700 bg-zinc-900 font-mono text-xs text-zinc-400"
+              }
+              data-testid="status-badge"
+            >
+              {alive ? "● ONLINE" : "○ OFFLINE"}
+            </Badge>
+          </div>
         </header>
 
         {/* Power */}
@@ -412,6 +426,7 @@ function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/" element={<Home />} />
+          <Route path="/console" element={<Console />} />
         </Routes>
       </BrowserRouter>
     </div>
