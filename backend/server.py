@@ -33,6 +33,9 @@ DISCORD_API = "https://discord.com/api/v10"
 
 verify_key = VerifyKey(bytes.fromhex(DISCORD_PUBLIC_KEY))
 
+# Keep strong references to background tasks so they aren't GC'd mid-flight.
+_BG_TASKS: set = set()
+
 # App + router
 app = FastAPI(title="Quintuple — Discord Bot")
 api_router = APIRouter(prefix="/api")
@@ -148,7 +151,9 @@ async def discord_interactions(
 
             # Schedule 4 followups, then return initial response now (= 1st message)
             interaction_token = payload["token"]
-            asyncio.create_task(send_followups(interaction_token, message, count=4, delay=0.5))
+            task = asyncio.create_task(send_followups(interaction_token, message, count=4, delay=0.5))
+            _BG_TASKS.add(task)
+            task.add_done_callback(_BG_TASKS.discard)
 
             return {
                 "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
