@@ -10,7 +10,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional
 import uuid
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 import httpx
 from nacl.signing import VerifyKey
@@ -34,12 +34,6 @@ ADMIN_PASSWORD = os.environ['ADMIN_PASSWORD']
 
 # Advertisement appended to every bot message.
 AD_LINK = "https://discord.gg/hAMTVDSmd8"
-
-# Members-only gate: users must be in this Discord server to use the bot.
-SUPPORT_GUILD_INVITE = "hAMTVDSmd8"
-SUPPORT_JOIN_URL = "https://discord.com/invite/hAMTVDSmd8"
-SUPPORT_GUILD_ID: Optional[str] = None
-_membership_cache: dict = {}  # user_id -> (is_member: bool, expires_at: datetime)
 
 # Hardcoded templates for /template subcommands.
 TEMPLATE_EMBED = (
@@ -173,69 +167,6 @@ def invoker_id(payload: dict) -> Optional[str]:
     return user.get("id")
 
 
-# ---------- Members-only gate ----------
-async def _resolve_support_guild() -> None:
-    """Resolve the support server's guild ID from the invite code (cached at startup)."""
-    global SUPPORT_GUILD_ID
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as http:
-            r = await http.get(f"{DISCORD_API}/invites/{SUPPORT_GUILD_INVITE}")
-            if r.status_code == 200:
-                SUPPORT_GUILD_ID = (r.json().get("guild") or {}).get("id")
-                logging.info(f"Support guild resolved: {SUPPORT_GUILD_ID}")
-            else:
-                logging.warning(f"Could not resolve invite ({r.status_code}): {r.text[:200]}")
-    except Exception as e:
-        logging.exception(f"resolve invite failed: {e}")
-
-
-async def is_member_of_support(user_id: Optional[str]) -> bool:
-    """
-    Check if the user is in the support server. Cached for 1h (members)
-    or 5min (non-members). Fails open if the bot can't query (e.g. not in guild),
-    so we never accidentally block everyone due to misconfig.
-    """
-    if not user_id or not SUPPORT_GUILD_ID:
-        return True  # fail-open
-
-    now = datetime.now(timezone.utc)
-    cached = _membership_cache.get(user_id)
-    if cached:
-        is_mem, exp = cached
-        if now < exp:
-            return is_mem
-
-    headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
-    try:
-        async with httpx.AsyncClient(timeout=2.5, headers=headers) as http:
-            r = await http.get(f"{DISCORD_API}/guilds/{SUPPORT_GUILD_ID}/members/{user_id}")
-            if r.status_code == 200:
-                _membership_cache[user_id] = (True, now + timedelta(hours=1))
-                return True
-            if r.status_code == 404:
-                _membership_cache[user_id] = (False, now + timedelta(minutes=5))
-                return False
-            # 401/403 etc. — bot probably isn't in the guild yet. Don't block users.
-            logging.warning(f"Member check returned {r.status_code}: {r.text[:200]}")
-            return True
-    except Exception as e:
-        logging.exception(f"Member check failed: {e}")
-        return True  # fail-open
-
-
-JOIN_SERVER_REPLY = {
-    "type": 4,  # RESP_CHANNEL_MESSAGE_WITH_SOURCE
-    "data": {
-        "content": (
-            "Hey! You're not in the loop bot Discord server. "
-            f"Join to have access to commands: {SUPPORT_JOIN_URL}"
-        ),
-        "flags": 64,  # ephemeral
-        "allowed_mentions": {"parse": []},
-    },
-}
-
-
 async def send_followups(
     interaction_token: str,
     message: str,
@@ -362,10 +293,6 @@ async def discord_interactions(
                     "flags": 64,
                 },
             }
-
-        # Members-only gate
-        if not await is_member_of_support(invoker_id(payload)):
-            return JOIN_SERVER_REPLY
 
         if name == "use":
             if not bot_is_alive():
@@ -588,8 +515,6 @@ async def discord_interactions(
                     "flags": 64,
                 },
             }
-        if not await is_member_of_support(invoker_id(payload)):
-            return JOIN_SERVER_REPLY
         return await _handle_component(payload)
 
     return JSONResponse(status_code=400, content={"error": "Unhandled interaction type"})
@@ -1026,11 +951,7 @@ async def _on_startup():
     bot_state["started_at"] = datetime.now(timezone.utc)
     # Warm the blacklist cache so the interaction handler has no DB roundtrip.
     await _reload_blacklist_cache()
-    # Resolve the support guild ID once at startup.
-    await _resolve_support_guild()
-    logging.info(
-        f"Bot ON, blacklist={len(_blacklist_cache)}, support_guild={SUPPORT_GUILD_ID}"
-    )
+    logging.info(f"Bot ON, blacklist cached: {len(_blacklist_cache)} entries")
 
 
 @app.on_event("shutdown")
