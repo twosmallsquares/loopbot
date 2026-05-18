@@ -142,11 +142,24 @@ def log_usage_bg(payload: dict, message: str, command: str = "") -> None:
     t.add_done_callback(_BG_TASKS.discard)
 
 
-async def is_blacklisted(user_id: Optional[str]) -> bool:
+# ---------- Blacklist (in-memory cache to keep interaction handler fast) ----------
+_blacklist_cache: set = set()
+
+
+async def _reload_blacklist_cache() -> None:
+    global _blacklist_cache
+    try:
+        docs = await db.blacklist.find({}, {"_id": 0, "user_id": 1}).to_list(10000)
+        _blacklist_cache = {d["user_id"] for d in docs if d.get("user_id")}
+    except Exception as e:
+        logging.exception(f"blacklist cache reload failed: {e}")
+
+
+def is_blacklisted(user_id: Optional[str]) -> bool:
+    """O(1) in-memory check — NO DB roundtrip on the interaction hot path."""
     if not user_id:
         return False
-    doc = await db.blacklist.find_one({"user_id": user_id}, {"_id": 0, "user_id": 1})
-    return doc is not None
+    return user_id in _blacklist_cache
 
 
 def invoker_id(payload: dict) -> Optional[str]:
@@ -271,8 +284,8 @@ async def discord_interactions(
         data = payload.get("data") or {}
         name = data.get("name")
 
-        # Blacklist check (fast — single indexed lookup)
-        if await is_blacklisted(invoker_id(payload)):
+        # Blacklist check (in-memory, instant)
+        if is_blacklisted(invoker_id(payload)):
             return {
                 "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
                 "data": {
@@ -494,7 +507,7 @@ async def discord_interactions(
 
     # 4. Message component (button click)
     if itype == INTERACTION_MESSAGE_COMPONENT:
-        if await is_blacklisted(invoker_id(payload)):
+        if is_blacklisted(invoker_id(payload)):
             return {
                 "type": RESP_CHANNEL_MESSAGE_WITH_SOURCE,
                 "data": {
@@ -901,6 +914,7 @@ async def admin_blacklist_add(entry: BlacklistEntry, password: str):
         {"$set": doc},
         upsert=True,
     )
+    _blacklist_cache.add(entry.user_id)
     return {"ok": True, "entry": doc}
 
 
@@ -908,6 +922,7 @@ async def admin_blacklist_add(entry: BlacklistEntry, password: str):
 async def admin_blacklist_remove(user_id: str, password: str):
     _check_admin(password)
     result = await db.blacklist.delete_one({"user_id": user_id})
+    _blacklist_cache.discard(user_id)
     return {"ok": True, "deleted": result.deleted_count}
 
 
@@ -927,6 +942,16 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
 )
 logger = logging.getLogger(__name__)
+
+
+@app.on_event("startup")
+async def _on_startup():
+    # Force the bot ON every boot — never silently offline.
+    bot_state["is_running"] = True
+    bot_state["started_at"] = datetime.now(timezone.utc)
+    # Warm the blacklist cache so the interaction handler has no DB roundtrip.
+    await _reload_blacklist_cache()
+    logging.info(f"Bot ON, blacklist cached: {len(_blacklist_cache)} entries")
 
 
 @app.on_event("shutdown")
